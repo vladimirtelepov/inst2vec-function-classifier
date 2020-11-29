@@ -1,0 +1,9 @@
+PyGithub
+requests
+argparse
+pycurl
+clang
+spacy
+numpy
+matplotlib
+sklearn
