@@ -4,6 +4,7 @@ import os
 import zipfile
 import argparse
 import shutil
+import time
 
 
 def createdir(dname):
@@ -28,7 +29,7 @@ def extract_cpp_files(path_in, path_out):
     for p in os.scandir(path_in):
         if p.is_dir():
             extract_cpp_files(p.path, path_out)
-        elif p.name.endswith(".cpp") or p.name.endswith(".cc") or p.name.endswith(".c"):
+        elif any((p.name.endswith(".cpp"), p.name.endswith(".cc"), p.name.endswith(".c"))):
             shutil.copy2(p, path_out)
 
 
@@ -37,44 +38,73 @@ def crawl(args):
     path = args["path"]
     store = args["store"]
     max_size = args["maxsize"] * 2**30
+    max_retries = 3
+    time_to_wait = 5
 
     g = github.Github(token)
-    repositories = g.search_repositories(
-        query="language:c++",
-        sort="stars",
-        order="desc")
     size = 0
-    for repo in repositories:
-        if size > max_size:
-            break
-        r = requests.get(repo.html_url + "/archive/master.zip")
-        path_zip = os.path.join(path, repo.name + ".zip")
-        with open(path_zip, "wb") as f:
-            f.write(r.content)
-        try:
+    stars = int(1e6)
+    # TODO: use threads
+    while size < max_size:
+        remaining, _ = g.rate_limiting
+        if not remaining:
+            time.sleep(g.rate_limiting_resettime - time.time())
+        repositories = g.search_repositories(
+            query=f"stars:<={stars} language:c language:c++",
+            sort="stars",
+            order="desc")
+        for repo in repositories:
+            stars = repo.stargazers_count
+            if size > max_size:
+                break
+
+            remaining, _ = g.rate_limiting
+            if not remaining:
+                time.sleep(g.rate_limiting_resettime - time.time())
+
+            path_funcs = os.path.join(path, repo.name)
+            path_master = os.path.join(path, repo.name + "-master")
+            if os.path.exists(path_funcs):
+                size += get_dir_size(path_funcs)
+                if store:
+                    size += get_dir_size(path_master)
+                continue
+
+            ct = max_retries + 1
+            while ct := ct - 1:
+                try:
+                    r = requests.get(repo.html_url + "/archive/master.zip")
+                    break
+                except:
+                    time.sleep(time_to_wait)
+            else:
+                print(repo.html_url)
+                continue
+
+            if not r.ok:
+                continue
+
+            path_zip = os.path.join(path, repo.name + ".zip")
+            with open(path_zip, "wb") as f:
+                f.write(r.content)
             with zipfile.ZipFile(path_zip, "r") as zip_ref:
                 zip_ref.extractall(path)
-        except:
+                dir_size = sum(el.file_size for el in zip_ref.infolist())
             os.remove(path_zip)
-            continue
 
-        os.remove(path_zip)
-        path_master = os.path.join(path, repo.name + "-master")
-        path_funcs = os.path.join(path, repo.name)
-
-        extract_cpp_files(path_master, path_funcs)
-        size += get_dir_size(path_funcs)
-        if store:
-            size += get_dir_size(path_master)
-        else:
-            shutil.rmtree(path_master)
+            extract_cpp_files(path_master, path_funcs)
+            size += get_dir_size(path_funcs)
+            if store:
+                size += dir_size
+            else:
+                shutil.rmtree(path_master)
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--token", type=str, required=True)
     parser.add_argument("--path", type=str, required=True)
-    parser.add_argument("--store", action="store_true", required=True)
+    parser.add_argument("--store", help="store crawled repo", action="store_true")
     parser.add_argument("--maxsize", type=int, help="GB", required=True)
     args = parser.parse_args()
     return vars(args)

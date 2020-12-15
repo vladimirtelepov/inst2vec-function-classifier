@@ -1,50 +1,67 @@
 import os
 import argparse
 import clang.cindex
-import typing
-from threading import Thread
+import multiprocessing as mp
+from threading import Thread, get_native_id
+import itertools
 
 
-class SimpleTread(Thread):
-    def __init__(self, folders, file):
-        Thread.__init__(self)
-        self.folders = folders
-        self.file = file
-
-    def run(self):
-        funcs = set()
-        for folder in self.folders:
-            print(f"Processeing {folder.name}")
-            for file in os.scandir(folder):
-                funcs |= get_func_names_from_file(file.path)
-
-        with open(self.file, "w") as out:
-            for f in funcs:
-                out.write(f + " ")
-
-
-def get_func_names_from_file(file_path):
-    def filter_node_list_by_kind(
-            nodes: typing.Iterable[clang.cindex.Cursor],
-            kinds: list
-    ) -> typing.Iterable[clang.cindex.Cursor]:
-        result = []
-        for node in nodes:
-            if node.kind in kinds:
-                result.append(node)
-
-        return result
-
+def _extract_funcs(q_in, q_out, args):
+    funcs = set()
     index = clang.cindex.Index.create()
-    try:
-        translation_units = index.parse(file_path, args=["-O0"])
-    except:
-        print("failed to compile {} file".format(file_path))
-        return set()
+    while not q_in.empty():
+        folder_path = os.path.join(args["path_in"], q_in.get())
+        for file in os.scandir(folder_path):
+            try:
+                # print(mp.current_process(), file.name)
+                # print(get_native_id(), file.name)
+                # print(">>", file.name)
+                translation_units = index.parse(file.path, args=["-O0"])
+            except:
+                print(f"failed to compile {file.path} file")
+                continue
 
-    funcs = filter_node_list_by_kind(translation_units.cursor.get_children(), [clang.cindex.CursorKind.FUNCTION_DECL])
-    func_names = [func.spelling for func in funcs]
-    return set(func_names)
+            func_nodes = (node for node in translation_units.cursor.get_children() if
+                          node.kind == clang.cindex.CursorKind.FUNCTION_DECL)
+            funcs |= set(",".join(
+                itertools.chain([f.spelling, f.result_type.get_canonical().spelling],
+                                (ff.type.get_canonical().spelling for ff in f.get_arguments()))
+            ) for f in func_nodes)
+            # print("<<", file.name)
+
+    q_out.put(funcs)
+
+
+def extract_funcs(q_in, q_out, args):
+    pool = [Thread(target=_extract_funcs, args=(q_in, q_out, args)) for _ in range(args["num_threads"])]
+    for t in pool:
+        t.start()
+    for t in pool:
+        t.join()
+
+
+def main(args):
+    q_in = mp.Queue()
+    q_out = mp.Queue()
+    for f in os.listdir(args["path_in"]):
+        q_in.put(f)
+
+    num_processes = args["num_processes"]
+    num_threads = args["num_threads"]
+    pool = [mp.Process(target=extract_funcs, args=(q_in, q_out, args)) for _ in range(num_processes)]
+    for p in pool:
+        p.start()
+
+    funcs = set()
+    for i in range(num_processes * num_threads):
+        funcs |= q_out.get()
+
+    for p in pool:
+        p.join()
+
+    with open(f"{args['file']}", "w") as out:
+        for f in funcs:
+            out.write(f + "\n")
 
 
 def parse_args():
@@ -52,37 +69,11 @@ def parse_args():
     parser.add_argument("--path-in", type=str, required=True)
     parser.add_argument("--file", type=str, required=True)
     parser.add_argument("--num-threads", type=int, required=True)
+    parser.add_argument("--num-processes", type=int, required=True)
     args = parser.parse_args()
     return vars(args)
 
 
-def extract_funcs(args):
-    path_in = args["path_in"]
-    file = args["file"]
-    num_threads = args["num_threads"]
-    folders = list(os.scandir(path_in))
-
-    threads = []
-    count_per_thread = len(folders) // num_threads
-    for i in range(num_threads - 1):
-        threads.append(SimpleTread(folders[i * count_per_thread: (i + 1) * count_per_thread], file + f"{i}.txt"))
-        threads[i].start()
-    threads.append(SimpleTread(folders[(num_threads - 1) * count_per_thread:], file + f"{num_threads - 1}.txt"))
-    threads[num_threads - 1].start()
-    for i in range(num_threads):
-        threads[i].join()
-
-    funcs = set()
-    for i in range(num_threads):
-        with open(file + f"{i}.txt", "r") as f:
-            funcs |= set(f.read().split(" "))
-        os.remove(file + f"{i}.txt")
-
-    with open(file + ".txt", "w") as out:
-        for f in funcs:
-            out.write(f + "\n")
-
-
 if __name__ == "__main__":
     args = parse_args()
-    extract_funcs(args)
+    main(args)
