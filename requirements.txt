@@ -1,9 +1,9 @@
 PyGithub
 requests
 argparse
-pycurl
-clang
+clang==11.0
 spacy
 numpy
 matplotlib
 sklearn
+jupyter

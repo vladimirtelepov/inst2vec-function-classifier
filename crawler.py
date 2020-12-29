@@ -17,10 +17,7 @@ def createdir(dname):
 def get_dir_size(path):
     size = 0
     for p in os.scandir(path):
-        if p.is_file():
-            size += p.stat().st_size
-        elif p.is_dir():
-            size += get_dir_size(p.path)
+        size += p.stat().st_size if p.is_file() else get_dir_size(p.path)
     return size
 
 

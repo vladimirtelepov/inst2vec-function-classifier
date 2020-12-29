@@ -2,34 +2,49 @@ import os
 import argparse
 import clang.cindex
 import multiprocessing as mp
-from threading import Thread, get_native_id
+from threading import Thread, get_ident
 import itertools
+import pickle
 
 
 def _extract_funcs(q_in, q_out, args):
     funcs = set()
     index = clang.cindex.Index.create()
+    file_log_folders = open(f"FUNCS_FOLDERS{os.getpid()}{get_ident()}", "w")
+    file_log_sets = open(f"FUNCS_SET{os.getpid()}{get_ident()}", "wb")
     while not q_in.empty():
         folder_path = os.path.join(args["path_in"], q_in.get())
+        
+        if folder_path in args["completed"]:
+            continue
+
+        file_log_folders.write(f"{folder_path}\n")
+        file_log_folders.flush()
+
         for file in os.scandir(folder_path):
             try:
-                # print(mp.current_process(), file.name)
-                # print(get_native_id(), file.name)
-                # print(">>", file.name)
                 translation_units = index.parse(file.path, args=["-O0"])
             except:
-                print(f"failed to compile {file.path} file")
                 continue
 
             func_nodes = (node for node in translation_units.cursor.get_children() if
                           node.kind == clang.cindex.CursorKind.FUNCTION_DECL)
-            funcs |= set(",".join(
-                itertools.chain([f.spelling, f.result_type.get_canonical().spelling],
-                                (ff.type.get_canonical().spelling for ff in f.get_arguments()))
+            # funcs |= set(",".join(
+            #     itertools.chain((f.spelling, f.result_type.get_canonical().spelling),
+            #                     (arg.type.get_canonical().spelling for arg in f.get_arguments()))
+            # ) for f in func_nodes)
+            s = set(",".join(
+                itertools.chain((f.spelling, f.result_type.get_canonical().spelling),
+                                (arg.type.get_canonical().spelling for arg in f.get_arguments()))
             ) for f in func_nodes)
-            # print("<<", file.name)
 
+            pickle.dump(s, file_log_sets)
+            file_log_folders.flush()
+
+    file_log_folders.close()
+    file_log_sets.close()
     q_out.put(funcs)
+    print(f"Process {os.getpid()} Thread {get_ident()} Finished")
 
 
 def extract_funcs(q_in, q_out, args):
@@ -48,6 +63,10 @@ def main(args):
 
     num_processes = args["num_processes"]
     num_threads = args["num_threads"]
+
+    with open("folders", "r") as f:
+        args["completed"] = f.read().split("\n")
+
     pool = [mp.Process(target=extract_funcs, args=(q_in, q_out, args)) for _ in range(num_processes)]
     for p in pool:
         p.start()
@@ -60,8 +79,7 @@ def main(args):
         p.join()
 
     with open(f"{args['file']}", "w") as out:
-        for f in funcs:
-            out.write(f + "\n")
+        out.write("\n".join(funcs))
 
 
 def parse_args():
