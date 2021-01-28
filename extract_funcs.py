@@ -2,24 +2,15 @@ import os
 import argparse
 import clang.cindex
 import multiprocessing as mp
-from threading import Thread, get_ident
+from threading import Thread
 import itertools
-import pickle
 
 
 def _extract_funcs(q_in, q_out, args):
     funcs = set()
     index = clang.cindex.Index.create()
-    file_log_folders = open(f"FUNCS_FOLDERS{os.getpid()}{get_ident()}", "w")
-    file_log_sets = open(f"FUNCS_SET{os.getpid()}{get_ident()}", "wb")
     while not q_in.empty():
         folder_path = os.path.join(args["path_in"], q_in.get())
-        
-        if folder_path in args["completed"]:
-            continue
-
-        file_log_folders.write(f"{folder_path}\n")
-        file_log_folders.flush()
 
         for file in os.scandir(folder_path):
             try:
@@ -29,22 +20,12 @@ def _extract_funcs(q_in, q_out, args):
 
             func_nodes = (node for node in translation_units.cursor.get_children() if
                           node.kind == clang.cindex.CursorKind.FUNCTION_DECL)
-            # funcs |= set(",".join(
-            #     itertools.chain((f.spelling, f.result_type.get_canonical().spelling),
-            #                     (arg.type.get_canonical().spelling for arg in f.get_arguments()))
-            # ) for f in func_nodes)
-            s = set(",".join(
+            funcs |= set(",".join(
                 itertools.chain((f.spelling, f.result_type.get_canonical().spelling),
                                 (arg.type.get_canonical().spelling for arg in f.get_arguments()))
             ) for f in func_nodes)
 
-            pickle.dump(s, file_log_sets)
-            file_log_folders.flush()
-
-    file_log_folders.close()
-    file_log_sets.close()
     q_out.put(funcs)
-    print(f"Process {os.getpid()} Thread {get_ident()} Finished")
 
 
 def extract_funcs(q_in, q_out, args):
@@ -63,9 +44,6 @@ def main(args):
 
     num_processes = args["num_processes"]
     num_threads = args["num_threads"]
-
-    with open("folders", "r") as f:
-        args["completed"] = f.read().split("\n")
 
     pool = [mp.Process(target=extract_funcs, args=(q_in, q_out, args)) for _ in range(num_processes)]
     for p in pool:
