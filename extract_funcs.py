@@ -4,26 +4,42 @@ import clang.cindex
 import multiprocessing as mp
 from threading import Thread
 import itertools
+import re
+import queue
 
 
 def _extract_funcs(q_in, q_out, args):
     funcs = set()
     index = clang.cindex.Index.create()
-    while not q_in.empty():
-        folder_path = os.path.join(args["path_in"], q_in.get())
+    re_parse = re.compile(r"[a-zA-Z0-9]+")
+    while True:
+        try:
+            cur_folder = q_in.get(timeout=1)
+        except queue.Empty:
+            break
 
+        folder_path = os.path.join(args["path_in"], cur_folder)
         for file in os.scandir(folder_path):
             try:
-                translation_units = index.parse(file.path, args=["-O0"])
+                translation_units = index.parse(file.path, args=["-O0", "-fparse-all-comments"])
             except:
                 continue
-
             func_nodes = (node for node in translation_units.cursor.get_children() if
                           node.kind == clang.cindex.CursorKind.FUNCTION_DECL)
-            funcs |= set(",".join(
-                itertools.chain((f.spelling, f.result_type.get_canonical().spelling),
-                                (arg.type.get_canonical().spelling for arg in f.get_arguments()))
-            ) for f in func_nodes)
+
+            funcs_from_file = []
+            for f in func_nodes:
+                try:
+                    comment = f.raw_comment
+                except UnicodeDecodeError:
+                    comment = ""
+
+                funcs_from_file.append("|".join(
+                    [f.spelling,
+                     ",".join(itertools.chain([f.result_type.get_canonical().spelling],
+                                              (arg.type.get_canonical().spelling for arg in f.get_arguments()))),
+                     ",".join(map(lambda x: x.group(), re_parse.finditer(comment))) if comment else ""]))
+            funcs |= set(funcs_from_file)
 
     q_out.put(funcs)
 
@@ -39,6 +55,7 @@ def extract_funcs(q_in, q_out, args):
 def main(args):
     q_in = mp.Queue()
     q_out = mp.Queue()
+
     for f in os.listdir(args["path_in"]):
         q_in.put(f)
 
