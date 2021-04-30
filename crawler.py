@@ -21,12 +21,13 @@ def get_dir_size(path):
     return size
 
 
-def extract_cpp_files(path_in, path_out):
+def extract_files(path_in, path_out, lang):
     createdir(path_out)
     for p in os.scandir(path_in):
         if p.is_dir():
-            extract_cpp_files(p.path, path_out)
-        elif any((p.name.endswith(".cpp"), p.name.endswith(".cc"), p.name.endswith(".c"))):
+            extract_files(p.path, path_out, lang)
+        elif lang == "c++" and any((p.name.endswith(".cpp"), p.name.endswith(".cc"), p.name.endswith(".c"))) or \
+                lang == "rust" and p.name.endswith(".rs"):
             shutil.copy2(p, path_out)
 
 
@@ -34,20 +35,20 @@ def crawl(args):
     token = args["token"]
     path = args["path"]
     store = args["store"]
-    max_size = args["maxsize"] * 2**30
+    max_size = args["maxsize"] * 2 ** 30
     max_retries = 3
     time_to_wait = 5
-
     g = github.Github(token)
     size = 0
     stars = int(1e6)
+    createdir(path)
     # TODO: use threads
     while size < max_size:
         remaining, _ = g.rate_limiting
         if not remaining:
             time.sleep(g.rate_limiting_resettime - time.time())
         repositories = g.search_repositories(
-            query=f"stars:<={stars} language:c language:c++",
+            query=f"stars:<={stars} {'language:c language:c++' if args['language'] == 'c++' else 'language:rust'}",
             sort="stars",
             order="desc")
         for repo in repositories:
@@ -89,7 +90,7 @@ def crawl(args):
                 dir_size = sum(el.file_size for el in zip_ref.infolist())
             os.remove(path_zip)
 
-            extract_cpp_files(path_master, path_funcs)
+            extract_files(path_master, path_funcs, args["language"])
             size += get_dir_size(path_funcs)
             if store:
                 size += dir_size
@@ -103,6 +104,7 @@ def parse_args():
     parser.add_argument("--path", type=str, required=True)
     parser.add_argument("--store", help="store crawled repo", action="store_true")
     parser.add_argument("--maxsize", type=int, help="GB", required=True)
+    parser.add_argument("--language", type=str, help="c++ or rust", required=True)
     args = parser.parse_args()
     return vars(args)
 
