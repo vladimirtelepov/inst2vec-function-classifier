@@ -22,7 +22,6 @@ def get_dir_size(path):
 
 
 def extract_files(path_in, path_out, lang):
-    createdir(path_out)
     for p in os.scandir(path_in):
         if p.is_dir():
             extract_files(p.path, path_out, lang)
@@ -90,6 +89,7 @@ def crawl(args):
                 dir_size = sum(el.file_size for el in zip_ref.infolist())
             os.remove(path_zip)
 
+            createdir(path_funcs)
             extract_files(path_master, path_funcs, args["language"])
             size += get_dir_size(path_funcs)
             if store:
