@@ -25,9 +25,10 @@ def extract_files(path_in, path_out, lang):
     for p in os.scandir(path_in):
         if p.is_dir():
             extract_files(p.path, path_out, lang)
-        elif lang == "c++" and any((p.name.endswith(".cpp"), p.name.endswith(".cc"), p.name.endswith(".c"))) or \
-                lang == "rust" and p.name.endswith(".rs"):
-            shutil.copy2(p, path_out)
+        elif lang == "c++" and any((p.name.endswith(".cpp"), p.name.endswith(".cc"), p.name.endswith(".c"),
+                                    p.name.endswith(".h"))) or lang == "rust" and p.name.endswith(".rs"):
+            fixed_path = os.path.join(path_out, p.name + ".cpp") if p.name.endswith(".h") else path_out
+            shutil.copy2(p, fixed_path)
 
 
 def crawl(args):
