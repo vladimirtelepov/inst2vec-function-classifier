@@ -50,14 +50,16 @@ fn extract_info(input: &str, items: &[syn::Item]) -> Vec<ExtractedInfo> {
     for item in items {
         match item {
             syn::Item::Fn(fn_item) => {
-                result.push(extract_info_impl(
-                    input,
-                    &fn_item.attrs,
-                    &fn_item.sig,
-                    last_item_end,
-                    fn_item.span().start(),
-                ));
-                last_item_end = item.span().end();
+                if !fn_item.block.stmts.is_empty() {
+                    result.push(extract_info_impl(
+                        input,
+                        &fn_item.attrs,
+                        &fn_item.sig,
+                        last_item_end,
+                        fn_item.span().start(),
+                    ));
+                    last_item_end = item.span().end();
+                }
             }
 
             syn::Item::Impl(impl_item) => {
