@@ -1,6 +1,6 @@
 import os
 import argparse
-import clang.cindex
+import clang.cindex as cind
 import multiprocessing as mp
 import threading
 import subprocess
@@ -15,8 +15,10 @@ re_parse = re.compile(r"[a-zA-Z0-9]+")
 
 
 def extract_funcs_cpp(q_in, q_out, args):
+    func_types = [cind.CursorKind.FUNCTION_DECL, cind.CursorKind.CXX_METHOD, cind.CursorKind.FUNCTION_TEMPLATE]
+    struct_types = [cind.CursorKind.CLASS_DECL, cind.CursorKind.STRUCT_DECL, cind.CursorKind.CLASS_TEMPLATE]
     funcs = set()
-    index = clang.cindex.Index.create()
+    index = cind.Index.create()
     while True:
         try:
             cur_folder = q_in.get(timeout=1)
@@ -29,8 +31,20 @@ def extract_funcs_cpp(q_in, q_out, args):
                 translation_units = index.parse(file.path, args=["-O0", "-fparse-all-comments"])
             except:
                 continue
-            func_nodes = (node for node in translation_units.cursor.get_children() if
-                          node.kind == clang.cindex.CursorKind.FUNCTION_DECL)
+
+            q = queue.Queue()
+            for node in translation_units.cursor.get_children():
+                if node.kind in struct_types or node.kind in func_types:
+                    q.put(node)
+
+            func_nodes = []
+            while not q.empty():
+                cur = q.get()
+                if cur.kind in func_types:
+                    func_nodes.append(cur)
+                elif cur.kind in struct_types:
+                    for node in cur.get_children():
+                        q.put(node)
 
             funcs_from_file = []
             for f in func_nodes:
@@ -39,10 +53,14 @@ def extract_funcs_cpp(q_in, q_out, args):
                 except UnicodeDecodeError:
                     comment = ""
 
+                arg_types = (arg.type.get_canonical().spelling for arg in f.get_children()
+                             if arg.kind == cind.CursorKind.PARM_DECL) \
+                    if f.kind == cind.CursorKind.FUNCTION_TEMPLATE \
+                    else (arg.type.get_canonical().spelling for arg in f.get_arguments())
+                types_string = ",".join(itertools.chain([f.result_type.get_canonical().spelling], arg_types))
+
                 funcs_from_file.append("|".join(
-                    [f.spelling,
-                     ",".join(itertools.chain([f.result_type.get_canonical().spelling],
-                                              (arg.type.get_canonical().spelling for arg in f.get_arguments()))),
+                    [f.spelling, types_string,
                      ",".join(map(lambda x: x.group(), re_parse.finditer(comment))) if comment else ""]))
             funcs |= set(funcs_from_file)
 
@@ -84,7 +102,7 @@ def parse_json(json_file):
         funcs_from_file.append("|".join(
             [f["name"],
              ",".join(itertools.chain([change_type_cpp_analog(f["output_type"])],
-                      map(change_type_cpp_analog, f["arg_types"]))),
+                                      map(change_type_cpp_analog, f["arg_types"]))),
              ",".join(map(lambda x: x.group(), re_parse.finditer(comment)) if comment else "")]))
     return funcs_from_file
 
@@ -152,7 +170,7 @@ def parse_args():
     parser.add_argument("--path-to-extractor", type=str, help="path to rust_extractor binary")
     args = parser.parse_args()
     if args.language == "rust" and args.path_to_extractor is None:
-        raise Exception("You must specify --path-to-extractor argumnet")
+        raise Exception("You must specify --path-to-extractor argument")
     return vars(args)
 
 
