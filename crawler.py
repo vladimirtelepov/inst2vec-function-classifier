@@ -5,6 +5,7 @@ import zipfile
 import argparse
 import shutil
 import time
+import tempfile
 
 
 def createdir(dname):
@@ -60,8 +61,9 @@ def crawl(args):
             if not remaining:
                 time.sleep(g.rate_limiting_resettime - time.time())
 
-            path_funcs = os.path.join(path, repo.name)
-            path_master = os.path.join(path, repo.name + "-master")
+            full_name = repo.full_name.replace("/", "_")
+            path_funcs = os.path.join(path, full_name)
+            path_master = os.path.join(path, full_name + "-master")
             if os.path.exists(path_funcs):
                 size += get_dir_size(path_funcs)
                 if store:
@@ -82,12 +84,14 @@ def crawl(args):
             if not r.ok:
                 continue
 
-            path_zip = os.path.join(path, repo.name + ".zip")
+            path_zip = os.path.join(path, full_name + ".zip")
             with open(path_zip, "wb") as f:
                 f.write(r.content)
             with zipfile.ZipFile(path_zip, "r") as zip_ref:
-                zip_ref.extractall(path)
-                dir_size = sum(el.file_size for el in zip_ref.infolist())
+                with tempfile.TemporaryDirectory() as tempdir:
+                    zip_ref.extractall(tempdir)
+                    shutil.move(os.path.join(tempdir, repo.name + "-master"), path_master)
+                    dir_size = sum(el.file_size for el in zip_ref.infolist())
             os.remove(path_zip)
 
             createdir(path_funcs)
