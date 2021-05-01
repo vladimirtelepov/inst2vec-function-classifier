@@ -28,8 +28,8 @@ def extract_funcs_cpp(q_in, q_out, args):
         folder_path = os.path.join(args["path_in"], cur_folder)
         for file in os.scandir(folder_path):
             try:
-                translation_units = index.parse(file.path, args=["-O0", "-fparse-all-comments"])
-            except:
+                translation_units = index.parse(file.path, args=["-O0", "-fparse-all-comments", "-C", "-CC"])
+            except cind.TranslationUnitLoadError:
                 continue
 
             q = queue.Queue()
@@ -41,6 +41,9 @@ def extract_funcs_cpp(q_in, q_out, args):
             while not q.empty():
                 cur = q.get()
                 if cur.kind in func_types:
+                    # skip functions from includes
+                    if os.path.abspath(cur.location.file.name) != file.path:
+                        continue
                     func_nodes.append(cur)
                 elif cur.kind in struct_types:
                     for node in cur.get_children():
@@ -48,6 +51,17 @@ def extract_funcs_cpp(q_in, q_out, args):
 
             funcs_from_file = []
             for f in func_nodes:
+                # skip empty functions
+                tokens = f.get_tokens()
+                br_found = False
+                for t in tokens:
+                    if t.spelling == "{":
+                        br_found = True
+                    if t.kind != cind.TokenKind.KEYWORD and t.kind != cind.TokenKind.PUNCTUATION and br_found:
+                        break
+                else:
+                    continue
+
                 try:
                     comment = f.raw_comment
                 except UnicodeDecodeError:
