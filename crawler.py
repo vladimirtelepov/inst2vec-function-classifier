@@ -47,7 +47,7 @@ def crawl(args):
     while size < max_size:
         remaining, _ = g.rate_limiting
         if not remaining:
-            time.sleep(g.rate_limiting_resettime - time.time())
+            time.sleep(abs(g.rate_limiting_resettime - time.time()))
         repositories = g.search_repositories(
             query=f"stars:<={stars} {'language:c language:c++' if args['language'] == 'c++' else 'language:rust'}",
             sort="stars",
@@ -59,7 +59,7 @@ def crawl(args):
 
             remaining, _ = g.rate_limiting
             if not remaining:
-                time.sleep(g.rate_limiting_resettime - time.time())
+                time.sleep(abs(g.rate_limiting_resettime - time.time()))
 
             full_name = repo.full_name.replace("/", "_")
             path_funcs = os.path.join(path, full_name)

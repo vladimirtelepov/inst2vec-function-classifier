@@ -7,3 +7,5 @@ numpy
 matplotlib
 sklearn
 jupyter
+python-magic
+rust_demangler
