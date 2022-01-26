@@ -20,7 +20,8 @@ import numpy as np
 import itertools as it
 import multiprocessing as mp
 from shutil import move, rmtree
-
+from multiprocessing.sharedctypes import Value
+from github.GithubException import RateLimitExceededException
 from sklearn.cluster import KMeans
 from sklearn.feature_extraction.text import TfidfVectorizer
 
@@ -217,92 +218,106 @@ def process_project(path, args):
     name2label = predict_label(signatures, args["prob3_path"], args["vocabulary_path"], args["idf_path"],
                                args["cluster_centers_path"], args["clasnum2labels_path"])
 
-    os.chdir(path)
+    ret_code = subprocess.call(f"cargo build --all-features --manifest-path {os.path.join(path, 'Cargo.toml')}",
+                               shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     num_files = 0
-    if subprocess.call("cargo build --all-features", shell=True, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL):
-        return num_files
+    if ret_code == 0:
+        binary_paths = []
+        for f in os.scandir(os.path.join(os.path.join(path, "target"), "debug")):
+            if f.is_file():
+                file_info = magic.from_file(os.path.abspath(f))
+                if file_info == "current ar archive" or file_info.startswith("ELF"):
+                    binary_paths.append(os.path.abspath(f))
 
-    binary_paths = []
-    for f in os.scandir(os.path.join(os.path.join(path, "target"), "debug")):
-        if f.is_file():
-            file_info = magic.from_file(os.path.abspath(f))
-            if file_info == "current ar archive" or file_info.startswith("ELF"):
-                binary_paths.append(os.path.abspath(f))
-
-    for p in binary_paths:
-        with tempfile.TemporaryDirectory() as tempdir:
-            move(p, tempdir)
-            path_ll = lift(os.path.join(tempdir, os.path.basename(p)), args["ida_path"], args["mcsema_lift_path"],
-                           args["llvm_dis_path"], args["mcsema_disas_timeout"])
-            if path_ll:
-                num_files += extract_funcs_from_ll(path_ll, name2label, args["dataset_path"])
+        for p in binary_paths:
+            with tempfile.TemporaryDirectory() as tempdir:
+                move(p, tempdir)
+                path_ll = lift(os.path.join(tempdir, os.path.basename(p)), args["ida_path"], args["mcsema_lift_path"],
+                               args["llvm_dis_path"], args["mcsema_disas_timeout"])
+                if path_ll:
+                    num_files += extract_funcs_from_ll(path_ll, name2label, args["dataset_path"])
     return num_files
 
 
-def safe_call(p_lock, t_lock, g, f, *args, **kwargs):
+def safe_call(p_lock, t_lock, f, *args, **kwargs):
     with p_lock, t_lock:
-        remaining, _ = g.rate_limiting
-        if not remaining:
-            time.sleep(abs(g.rate_limiting_resettime - time.time()))
         res = f(*args, **kwargs)
     return res
 
 
-def gen_dataset(p_lock, t_lock, p_num, t_num, g, args, max_retries=3, time_to_wait=5):
+def get_repo(idx, stars, prev_idx, g, repositories):
+    # Search Api Limits, use fixed totalCount because PyGithub bug
+    pagesize = 30
+    totalCount = 1000
+    dt = 5
+    if idx.value == totalCount - 1:
+        stars.value = repositories[totalCount - 1].stargazers_count
+        idx.value = -1
+    if prev_idx >= idx.value:
+        repositories = g.search_repositories(query=f"stars:<={stars.value} language:rust", sort="stars", order="desc")
+        prev_idx = -1
+
+    idx.value += 1
+    num_requests = idx.value // pagesize - prev_idx // pagesize
+    remaining, _ = g.rate_limiting
+    if remaining < num_requests:
+        time.sleep(abs(g.rate_limiting_resettime - time.time()) + dt)
+    try:
+        repo = repositories[idx.value]
+    except RateLimitExceededException:
+        # use this exception because PyGithub bug rate_limiting calculation
+        time.sleep(abs(g.rate_limiting_resettime - time.time()) + dt)
+        repo = repositories[idx.value]
+
+    return idx.value, repo, repositories
+
+
+def gen_dataset(p_lock, t_lock, num_files, idx, stars, args, max_retries=3, time_to_wait=5):
+    g = github.Github(args["token"])
     random.seed(threading.get_native_id())
-    num_files = 0
-    stars = int(1e6)
-    total_num_threads = args["num_threads"] * args["num_processes"]
-    thread_idx = p_num * args["num_threads"] + t_num
 
     with open(args["processed_repos_path"], "a+") as processed_repos_file, tempfile.TemporaryDirectory() as tmpdir:
         processed_repos_file.seek(0)
         processed_repos = set(processed_repos_file.read().split("\n"))
-        while num_files < args["num_files"]:
-            repositories = g.search_repositories(query=f"stars:<={stars} language:rust", sort="stars", order="desc")
-            num_repos = repositories.totalCount
-            count_per_thread = num_repos // total_num_threads
-            rg = range(count_per_thread * thread_idx, count_per_thread * (thread_idx + 1)) \
-                if thread_idx != total_num_threads - 1 else range(count_per_thread * thread_idx, num_repos)
-
-            for ind in rg:
-                repo = safe_call(p_lock, t_lock, g, repositories.__getitem__, ind)
-                stars = repo.stargazers_count
-                if num_files > args["num_files"]:
+        repositories = g.search_repositories(query=f"stars:<={stars.value} language:rust", sort="stars", order="desc")
+        prev_idx = -1
+        while num_files.value < args["num_files"]:
+            prev_idx, repo, repositories = safe_call(p_lock, t_lock, get_repo, idx, stars, prev_idx, g, repositories)
+            full_name = repo.full_name.replace("/", "_")
+            if full_name in processed_repos:
+                continue
+            ct = max_retries + 1
+            while ct := ct - 1:
+                try:
+                    r = requests.get(repo.html_url + "/archive/master.zip")
                     break
+                except:
+                    time.sleep(time_to_wait)
+            else:
+                continue
+            if not r.ok:
+                continue
 
-                full_name = repo.full_name.replace("/", "_")
-                if full_name in processed_repos:
-                    continue
-                ct = max_retries + 1
-                while ct := ct - 1:
-                    try:
-                        r = requests.get(repo.html_url + "/archive/master.zip")
-                        break
-                    except:
-                        time.sleep(time_to_wait)
-                else:
-                    continue
-                if not r.ok:
-                    continue
-
-                path_zip = os.path.join(tmpdir, full_name + ".zip")
-                with open(path_zip, "wb") as f:
-                    f.write(r.content)
-                with zipfile.ZipFile(path_zip, "r") as zip_ref:
-                    zip_ref.extractall(tmpdir)
-                    num_files += process_project(os.path.join(tmpdir, repo.name + "-master"), args)
-                rmtree(os.path.join(tmpdir, repo.name + "-master"))
-                os.remove(path_zip)
-                processed_repos.add(full_name)
-                safe_call(p_lock, t_lock, g, processed_repos_file.write, full_name + "\n")
+            path_zip = os.path.join(tmpdir, full_name + ".zip")
+            with open(path_zip, "wb") as f:
+                f.write(r.content)
+            with zipfile.ZipFile(path_zip, "r") as zip_ref:
+                zip_ref.extractall(tmpdir)
+                nfiles = process_project(os.path.join(tmpdir, repo.name + "-master"), args)
+                with p_lock, t_lock:
+                    num_files.value += nfiles
+                    print(f"{full_name}: {nfiles}")
+            rmtree(os.path.join(tmpdir, repo.name + "-master"))
+            os.remove(path_zip)
+            processed_repos.add(full_name)
+            safe_call(p_lock, t_lock, processed_repos_file.write, full_name + "\n")
+            processed_repos_file.flush()
 
 
-def spawn_threads(p_lock, p_num, g, args):
+def spawn_threads(p_lock, num_files, idx, stars, args):
     t_lock = threading.Lock()
-    pool = [threading.Thread(target=gen_dataset, args=(p_lock, t_lock, p_num, t_num, g, args))
-            for t_num in range(args["num_threads"])]
+    pool = [threading.Thread(target=gen_dataset, args=(p_lock, t_lock, num_files, idx, stars, args))
+            for _ in range(args["num_threads"])]
     for t in pool:
         t.start()
     for t in pool:
@@ -310,9 +325,12 @@ def spawn_threads(p_lock, p_num, g, args):
 
 
 def spawn_processes(args):
-    g = github.Github(args["token"])
     p_lock = mp.Lock()
-    pool = [mp.Process(target=spawn_threads, args=(p_lock, p_num, g, args)) for p_num in range(args["num_processes"])]
+    num_files = Value("i", 0, lock=False)
+    idx = Value("i", -1, lock=False)
+    stars = Value("i", int(1e6), lock=False)
+    pool = [mp.Process(target=spawn_threads, args=(p_lock, num_files, idx, stars, args))
+            for _ in range(args["num_processes"])]
     for p in pool:
         p.start()
     for p in pool:
@@ -336,7 +354,7 @@ def parse_args():
     parser.add_argument("--processed-repos-path", type=str, required=True)
     parser.add_argument("--ida-path", type=str, required=True)
     parser.add_argument("--get-cfg-path", type=str, help="path to get_cfg.py script from mcsema", required=True)
-    parser.add_argument("--mcsema-lift-path", type=str, required=True)
+    parser.add_argument("--mcsema-lift-path", type=str)
     parser.add_argument("--llvm-dis-path", type=str, required=True)
     parser.add_argument("--prob3-path", type=str, required=True)
     parser.add_argument("--vocabulary-path", type=str, required=True)
@@ -346,7 +364,7 @@ def parse_args():
     parser.add_argument("--num-threads", type=int, default=1)
     parser.add_argument("--mcsema-disas-timeout", type=int, default=600)
     parser.add_argument("--num-processes", type=int, default=1)
-    parser.add_argument("--num_files", type=int, default=int(1e3), help="max generated .ll files per thread")
+    parser.add_argument("--num_files", type=int, default=int(1e3))
     args = parser.parse_args()
     return vars(args)
 
