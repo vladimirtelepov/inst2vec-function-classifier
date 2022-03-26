@@ -10,3 +10,4 @@ jupyter
 python-magic~=0.4.24
 scikit-learn~=1.0.1
 dill~=0.3.4
+nltk~=3.6.7
