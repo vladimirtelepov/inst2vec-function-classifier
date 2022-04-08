@@ -29,6 +29,26 @@ from nltk.corpus import stopwords
 from extract_funcs import parse_json
 
 
+nltk_stopwords = set(stopwords.words("english"))
+custom_stop_words = {
+    "return", "use", "value", "let", "mut", "type", "sync", "ex", "mc", "sm", "cm", "global",
+    "tuple", "call", "crust", "pointer", "vr", "datum", "fill", "ref", "simple",
+    "default", "byte", "buff", "null", "numb", "slice", "tx", "ptr", "ext", "content", "cairo",
+    "update", "bite", "map", "int", "object", "obj", "type", "bindgen", "const", "constant",
+    "one", "run", "change", "make", "op", "entry", "true", "end", "next", "group", "scale",
+    "cmd", "point", "float", "apply", "control", "without", "generic", "template",
+    "main", "method", "range", "command", "item", "bit", "empty", "current", "target", "fix",
+    "offset", "zero", "result", "double", "visit", "option", "opt", "rx", "try", "internal",
+    "prepare", "reference", "char", "execute", "exec", "emit", "power", "element", "local",
+    "work", "raw", "api", "context", "ctx", "self", "proc", "ctrl", "last", "per", "need",
+    "class", "struct", "two", "iter", "base", "impl", "ic", "non", "var", "single", "st",
+    "implement", "variant", "\ufeff1", "require", "feature", "mk", "level", "enum", "long",
+    "argument", "args", "arg", "must", "brief", "note", "example", "pass", "much", "none",
+    "may", "structure", "foo", "uint", "integer", "bool", "hex", "dt", "app", "instr", "inst",
+    "lead", "slot", "rt"
+}
+stop_words = nltk_stopwords | custom_stop_words
+
 classes = {
     "destroy": [
         "clean", "cleanup", "clear", "remove", "drop", "reset", "free", "shutdown", "bite", "finish", "erase",
@@ -296,25 +316,6 @@ def predict_label(signatures, prob_path):
 
     tokenized_func_names = lemmatize_corpus(tokenized_func_names)
 
-    custom_stop_words = {
-        "return", "use", "value", "let", "mut", "type", "sync", "ex", "mc", "sm", "cm", "global",
-        "tuple", "call", "crust", "pointer", "vr", "datum", "fill", "ref", "simple",
-        "default", "byte", "buff", "null", "numb", "slice", "tx", "ptr", "ext", "content", "cairo",
-        "update", "bite", "map", "int", "object", "obj", "type", "bindgen", "const", "constant",
-        "one", "run", "change", "make", "op", "entry", "true", "end", "next", "group", "scale",
-        "cmd", "point", "float", "apply", "control", "without", "generic", "template",
-        "main", "method", "range", "command", "item", "bit", "empty", "current", "target", "fix",
-        "offset", "zero", "result", "double", "visit", "option", "opt", "rx", "try", "internal",
-        "prepare", "reference", "char", "execute", "exec", "emit", "power", "element", "local",
-        "work", "raw", "api", "context", "ctx", "self", "proc", "ctrl", "last", "per", "need",
-        "class", "struct", "two", "iter", "base", "impl", "ic", "non", "var", "single", "st",
-        "implement", "variant", "\ufeff1", "require", "feature", "mk", "level", "enum", "long",
-        "argument", "args", "arg", "must", "brief", "note", "example", "pass", "much", "none",
-        "may", "structure", "foo", "uint", "integer", "bool", "hex", "dt", "app", "instr", "inst",
-        "lead", "slot", "rt"
-    }
-    stop_words = set(stopwords.words("english")) | custom_stop_words
-
     def prune_vocabulary(func_names, tokenized_func_names, stop_words, max_ct=1e22, min_ct=1, min_len=2, max_len=20):
         word2count = collections.Counter(itertools.chain(*tokenized_func_names))
         word2count = {k: v for k, v in sorted(word2count.items(), key=lambda item: item[1], reverse=True)
@@ -379,7 +380,7 @@ def lift(path_bin, path_get_cfg, path_ida, path_llvm_dis, mcsema_disas_timeout, 
         return
     path_cfg, path_bc, path_ll = f"{path_bin}.cfg", f"{path_bin}.bc", f"{path_bin}.ll"
     try:
-        ret_code = subprocess.call(f"wine {path_ida} -B -S\"{path_get_cfg} --output {path_cfg} --arch amd64 "
+        ret_code = subprocess.call(f"exec wine {path_ida} -B -S\"{path_get_cfg} --output {path_cfg} --arch amd64 "
                                    f"--os linux --entrypoint main\" {path_bin}", shell=True,
                                    timeout=mcsema_disas_timeout, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if any((ret_code, not os.path.exists(path_cfg), not os.stat(path_cfg).st_size)):
@@ -470,7 +471,7 @@ def get_repo(idx, stars, prev_idx, g, repositories):
         time.sleep(abs(g.rate_limiting_resettime - time.time()) + dt)
     try:
         repo = repositories[idx.value]
-    except RateLimitExceededException:
+    except (RateLimitExceededException, requests.exceptions.ConnectTimeout):
         # use this exception because PyGithub bug rate_limiting calculation
         time.sleep(abs(g.rate_limiting_resettime - time.time()) + dt)
         repo = repositories[idx.value]
@@ -489,7 +490,7 @@ def gen_dataset(p_lock, t_lock, num_files, idx, stars, args, max_retries=3, time
         prev_idx = -1
         while num_files.value < args["num_files"]:
             prev_idx, repo, repositories = safe_call(p_lock, t_lock, get_repo, idx, stars, prev_idx, g, repositories)
-            full_name = repo.full_name.replace("/", "_")
+            full_name = repo.full_name
             if full_name in processed_repos:
                 continue
             ct = max_retries + 1
@@ -504,7 +505,7 @@ def gen_dataset(p_lock, t_lock, num_files, idx, stars, args, max_retries=3, time
             if not r.ok:
                 continue
 
-            path_zip = os.path.join(tmpdir, full_name + ".zip")
+            path_zip = os.path.join(tmpdir, full_name.replace("/", "_") + ".zip")
             with open(path_zip, "wb") as f:
                 f.write(r.content)
             with zipfile.ZipFile(path_zip, "r") as zip_ref:
@@ -516,7 +517,6 @@ def gen_dataset(p_lock, t_lock, num_files, idx, stars, args, max_retries=3, time
                     num_files.value += nfiles
                     print(f"{full_name}: {nfiles}")
             rmtree(path_proj)
-            processed_repos.add(full_name)
             safe_call(p_lock, t_lock, processed_repos_file.write, full_name + "\n")
             processed_repos_file.flush()
 
@@ -535,7 +535,15 @@ def spawn_processes(args):
     p_lock = mp.Lock()
     num_files = Value("i", 0, lock=False)
     idx = Value("i", -1, lock=False)
-    stars = Value("i", int(1e6), lock=False)
+    try:
+        with open(args["processed_repos_path"], "r") as processed_repos_file:
+            last_repo_name = processed_repos_file.read().split("\n")[-2]
+        stars = github.Github(args["token"]).search_repositories(query=f"repo:{last_repo_name}")[0].stargazers_count
+
+    except FileNotFoundError:
+        stars = int(1e6)
+
+    stars = Value("i", stars, lock=False)
     pool = [mp.Process(target=spawn_threads, args=(p_lock, num_files, idx, stars, args))
             for _ in range(args["num_processes"])]
     for p in pool:
