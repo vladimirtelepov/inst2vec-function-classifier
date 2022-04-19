@@ -238,7 +238,7 @@ def extract_funcs_from_ll(path_ll, name2label, path_dataset, randlen=5):
             for match in pattern.finditer(mmap_obj):
                 name = str(match.group(1), encoding="utf8")
                 rand = "".join(random.choice([str(i) for i in range(10)]) for _ in range(randlen))
-                with open(os.path.join(os.path.join(path_dataset, name2label[name]), name + rand), "wb") as f:
+                with open(os.path.join(os.path.join(path_dataset, name2label[name]), name + rand + ".ll"), "wb") as f:
                     f.write(match.group(0))
                 num_files += 1
 
@@ -375,7 +375,7 @@ def predict_label(signatures, prob_path):
 
 
 def lift(path_bin, path_get_cfg, path_ida, path_llvm_dis, mcsema_disas_timeout, llvm_version, os_version,
-         path_mcsema_lift, max_bin_size=int(500e6)):
+         path_mcsema_lift, max_bin_size=int(1000e6)):
     if os.stat(path_bin).st_size > max_bin_size:
         return
     path_cfg, path_bc, path_ll = f"{path_bin}.cfg", f"{path_bin}.bc", f"{path_bin}.ll"
@@ -383,9 +383,9 @@ def lift(path_bin, path_get_cfg, path_ida, path_llvm_dis, mcsema_disas_timeout, 
         ret_code = subprocess.call(f"exec wine {path_ida} -B -S\"{path_get_cfg} --output {path_cfg} --arch amd64 "
                                    f"--os linux --entrypoint main\" {path_bin}", shell=True,
                                    timeout=mcsema_disas_timeout, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if any((ret_code, not os.path.exists(path_cfg), not os.stat(path_cfg).st_size)):
+        if ret_code or not os.stat(path_cfg).st_size:
             return
-    except subprocess.TimeoutExpired:
+    except (subprocess.TimeoutExpired, FileNotFoundError):
         return
     if path_mcsema_lift:
         cmd = f"{path_mcsema_lift} --output {path_bc} --arch amd64 --os linux --cfg {path_cfg}",
@@ -510,12 +510,12 @@ def gen_dataset(p_lock, t_lock, num_files, idx, stars, args, max_retries=3, time
                 f.write(r.content)
             with zipfile.ZipFile(path_zip, "r") as zip_ref:
                 zip_ref.extractall(tmpdir)
-                os.remove(path_zip)
-                path_proj = os.path.join(tmpdir, os.listdir(tmpdir)[0])
-                nfiles = process_project(path_proj, args)
-                with p_lock, t_lock:
-                    num_files.value += nfiles
-                    print(f"{full_name}: {nfiles}")
+            os.remove(path_zip)
+            path_proj = os.path.join(tmpdir, os.listdir(tmpdir)[0])
+            nfiles = process_project(path_proj, args)
+            with p_lock, t_lock:
+                num_files.value += nfiles
+                print(f"{full_name}: {nfiles}")
             rmtree(path_proj)
             safe_call(p_lock, t_lock, processed_repos_file.write, full_name + "\n")
             processed_repos_file.flush()
