@@ -1,30 +1,32 @@
-import functools
-import operator
 import os
-import re
-import mmap
-import time
-import magic
-import queue
-import github
-import random
-import zipfile
+import toml
 import spacy
 import requests
-import argparse
-import tempfile
-import threading
-import itertools
-import collections
-import subprocess
 import dill as pickle
-import numpy as np
-import itertools as it
-import multiprocessing as mp
-from shutil import move, rmtree
-from multiprocessing.sharedctypes import Value
-from github.GithubException import RateLimitExceededException
+from json import dumps
+from numpy import cumsum
+from queue import Queue
+from shutil import rmtree
+from itertools import chain
+from zipfile import ZipFile
+from time import time, sleep
+from random import choice, seed
+from collections import Counter
 from nltk.corpus import stopwords
+from mmap import mmap, ACCESS_READ
+from rust_demangler import demangle
+from argparse import ArgumentParser
+from operator import __mul__ as mul
+from re import compile, ASCII, DOTALL
+from tempfile import NamedTemporaryFile
+from functools import lru_cache, reduce
+from magic import from_file as magic_info
+from multiprocessing.sharedctypes import Value
+from multiprocessing import Process, Lock as mLock
+from subprocess import call, DEVNULL, TimeoutExpired
+from threading import Thread, get_native_id, Lock as tLock
+from github import Github
+from github.GithubException import RateLimitExceededException
 
 from extract_funcs import parse_json
 
@@ -226,23 +228,30 @@ classes = {
 }
 
 
-def extract_funcs_from_ll(path_ll, name2label, path_dataset, randlen=5):
+def extract_funcs_from_ll(crate_name, path_ll, name2label, path_dataset, randlen=5):
     one_from_names = rf"(?:{'|'.join(name2label.keys())})"
-    str_start_pattern = rf"define internal %struct\.Memory\* @sub_\w+({one_from_names})"
-    str_pattern = str_start_pattern + r"[a-zA-Z0-9]{20}[^}]+}\n"
-    pattern = re.compile(bytes(str_pattern, encoding="utf-8"), re.ASCII | re.DOTALL)
+    str_pattern = rf"define internal %struct\.Memory\* @sub_[^_]+_(\w+?{one_from_names}[a-zA-Z0-9]{{20}})\(%struct\."
+    str_pattern += r"State\* noalias nonnull align 1 %state, i64 %pc, %struct\.Memory\* noalias %memory\)[^}]+}\n"
+    pattern = compile(bytes(str_pattern, encoding="utf-8"), ASCII | DOTALL)
     num_files = 0
+    files = []
 
     with open(path_ll) as llfile:
-        with mmap.mmap(llfile.fileno(), length=0, access=mmap.ACCESS_READ) as mmap_obj:
+        with mmap(llfile.fileno(), length=0, access=ACCESS_READ) as mmap_obj:
             for match in pattern.finditer(mmap_obj):
-                name = str(match.group(1), encoding="utf8")
-                rand = "".join(random.choice([str(i) for i in range(10)]) for _ in range(randlen))
-                with open(os.path.join(os.path.join(path_dataset, name2label[name]), name + rand + ".ll"), "wb") as f:
-                    f.write(match.group(0))
-                num_files += 1
-
-    return num_files
+                fullname = demangle(str(match.group(1), encoding="utf8"))
+                fullname = fullname[: fullname.rfind("::")]
+                cratename = fullname[: fullname.find("::")]
+                cratename = cratename[5: cratename.find("__", 5)] if cratename.startswith("__LT_") else cratename
+                name = fullname[fullname.rfind("::") + 2:]
+                if name in name2label and cratename == crate_name:
+                    rand = "".join(choice([str(i) for i in range(10)]) for _ in range(randlen))
+                    filename = os.path.join(os.path.join(path_dataset, name2label[name]), name + rand + ".ll")
+                    with open(filename, "wb") as f:
+                        f.write(match.group(0))
+                    num_files += 1
+                    files.append(filename)
+    return files
 
 
 def predict_label(signatures, prob_path):
@@ -255,9 +264,9 @@ def predict_label(signatures, prob_path):
         func_names.append(name)
 
     def tokenize_funcs(funcs):
-        oneword = re.compile(r"^[a-z][a-z0-9]+|[A-Z][A-Z0-9]$")
-        difCase = re.compile(r".+?(?:(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])|$)")
-        under_scores_split = re.compile(r"_")
+        oneword = compile(r"^[a-z][a-z0-9]+|[A-Z][A-Z0-9]$")
+        difCase = compile(r".+?(?:(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])|$)")
+        under_scores_split = compile(r"_")
 
         tokenized_funcs = []
         for f in funcs:
@@ -272,7 +281,7 @@ def predict_label(signatures, prob_path):
     tokenized_func_names = tokenize_funcs(func_names)
 
     def drop_wrong_symbols(tokenized_func_names):
-        wrong_char = re.compile(r"[\d]")
+        wrong_char = compile(r"[\d]")
         tokenized_func_names_ = []
         for tokenized_name in tokenized_func_names:
             processed_tokens = [wrong_char.sub("", token).lower() for token in tokenized_name if
@@ -289,17 +298,17 @@ def predict_label(signatures, prob_path):
     def split(word, start=1, end=20):
         return ((word[:i], word[i:]) for i in range(start, min(len(word) + 1, end)))
 
-    @functools.lru_cache(maxsize=10000)
+    @lru_cache(maxsize=10000)
     def segment(word, maxlen=500):
         if not word:
             return []
         if len(word) > maxlen:
             return segment(word[:maxlen]) + segment(word[maxlen:])
         candidates = ([first] + segment(remaining) for first, remaining in split(word))
-        return max(candidates, key=lambda x: functools.reduce(operator.__mul__, map(prob, x), 1))
+        return max(candidates, key=lambda x: reduce(mul, map(prob, x), 1))
 
     def segmentize_corpus(tokenized_func_names, segmenter):
-        tokenized_func_names = [list(it.chain(*(segmenter(token) for token in tokens)))
+        tokenized_func_names = [list(chain(*(segmenter(token) for token in tokens)))
                                 for tokens in tokenized_func_names]
         return tokenized_func_names
 
@@ -307,8 +316,8 @@ def predict_label(signatures, prob_path):
 
     def lemmatize_corpus(tokenized_func_names):
         nlp = spacy.load("en_core_web_sm", disable=["parser", "ner"])
-        lengths = np.cumsum([0] + list(map(len, tokenized_func_names)))
-        flat_tokens = list(it.chain(*tokenized_func_names))
+        lengths = cumsum([0] + list(map(len, tokenized_func_names)))
+        flat_tokens = list(chain(*tokenized_func_names))
         doc = spacy.tokens.Doc(nlp.vocab, words=flat_tokens)
         tokenized_func_names = [[token.lemma_ for token in doc[lengths[i - 1]: lengths[i]]]
                                 for i in range(1, len(tokenized_func_names) + 1)]
@@ -317,7 +326,7 @@ def predict_label(signatures, prob_path):
     tokenized_func_names = lemmatize_corpus(tokenized_func_names)
 
     def prune_vocabulary(func_names, tokenized_func_names, stop_words, max_ct=1e22, min_ct=1, min_len=2, max_len=20):
-        word2count = collections.Counter(itertools.chain(*tokenized_func_names))
+        word2count = Counter(chain(*tokenized_func_names))
         word2count = {k: v for k, v in sorted(word2count.items(), key=lambda item: item[1], reverse=True)
                       if min_ct <= v <= max_ct and min_len <= len(k) <= max_len and k not in stop_words}
         tokenized_func_names_ = []
@@ -363,7 +372,7 @@ def predict_label(signatures, prob_path):
                 tokenized_func_names_.append(tokenized_name)
                 func_names_.append(name)
             else:
-                c = random.choice(candidates)
+                c = choice(candidates)
                 class2funcs[c].append((name, tokenized_name))
 
         return func_names_, tokenized_func_names_
@@ -380,12 +389,12 @@ def lift(path_bin, path_get_cfg, path_ida, path_llvm_dis, mcsema_disas_timeout, 
         return
     path_cfg, path_bc, path_ll = f"{path_bin}.cfg", f"{path_bin}.bc", f"{path_bin}.ll"
     try:
-        ret_code = subprocess.call(f"exec wine {path_ida} -B -S\"{path_get_cfg} --output {path_cfg} --arch amd64 "
-                                   f"--os linux --entrypoint main\" {path_bin}", shell=True,
-                                   timeout=mcsema_disas_timeout, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        ret_code = call(f"exec wine {path_ida} -B -S\"{path_get_cfg} --output {path_cfg} --arch amd64 --os linux "
+                        f"--entrypoint main\" {path_bin}", shell=True, timeout=mcsema_disas_timeout, stdout=DEVNULL,
+                        stderr=DEVNULL)
         if ret_code or not os.stat(path_cfg).st_size:
             return
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (TimeoutExpired, FileNotFoundError):
         return
     if path_mcsema_lift:
         cmd = f"{path_mcsema_lift} --output {path_bc} --arch amd64 --os linux --cfg {path_cfg}",
@@ -393,16 +402,16 @@ def lift(path_bin, path_get_cfg, path_ida, path_llvm_dis, mcsema_disas_timeout, 
         cmd = f"docker run -it --rm --ipc=host -v {os.path.dirname(path_bin)}:/mcsema/local " \
               f"ghcr.io/lifting-bits/mcsema/mcsema-llvm{llvm_version}-{os_version}-amd64 --arch amd64 --os linux " \
               f"--cfg /mcsema/local/{os.path.basename(path_cfg)} --output /mcsema/local/{os.path.basename(path_bc)}"
-    if subprocess.call(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL):
+    if call(cmd, shell=True, stdout=DEVNULL, stderr=DEVNULL):
         return
-    if subprocess.call(f"{path_llvm_dis} {path_bc} -o {path_ll}", shell=True):
+    if call(f"{path_llvm_dis} {path_bc} -o {path_ll}", shell=True):
         return
     return path_ll if os.path.exists(path_ll) and os.stat(path_ll).st_size else None
 
 
 def process_project(path, args):
     source_paths = []
-    q = queue.Queue()
+    q = Queue()
     for p in os.scandir(path):
         q.put(p)
     while not q.empty():
@@ -414,36 +423,49 @@ def process_project(path, args):
                 q.put(p)
 
     signatures = set()
-    with tempfile.NamedTemporaryFile("r+") as tmpfile:
+    with NamedTemporaryFile("r+") as tmpfile:
         for p in source_paths:
             tmpfile.truncate(0)
-            if subprocess.call(f"{args['extractor_path']} {p} {tmpfile.name}", shell=True, stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL):
+            if call(f"{args['extractor_path']} {p} {tmpfile.name}", shell=True, stdout=DEVNULL, stderr=DEVNULL):
                 continue
             tmpfile.seek(0)
             signatures |= set(parse_json(tmpfile))
     name2label = predict_label(signatures, args["prob_path"])
-
-    ret_code = subprocess.call(f"cargo build --all-features --manifest-path {os.path.join(path, 'Cargo.toml')}",
-                               shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     num_files = 0
+    if not name2label:
+        return num_files, None, None
+
+    cargo_path = os.path.join(path, "Cargo.toml")
+    ret_code = call(f"cargo build --manifest-path {cargo_path}", shell=True, stdout=DEVNULL, stderr=DEVNULL)
+
+    bin2funcs = {}
     if ret_code == 0:
+        with open(cargo_path) as f:
+            content = toml.load(f)
+        try:
+            crate_name = content["package"]["name"]
+        except KeyError:
+            crate_name = None
+
         binary_paths = []
         for f in os.scandir(os.path.join(os.path.join(path, "target"), "debug")):
             if f.is_file():
-                file_info = magic.from_file(os.path.abspath(f))
+                file_info = magic_info(os.path.abspath(f))
                 if file_info == "current ar archive" or file_info.startswith("ELF"):
                     binary_paths.append(os.path.abspath(f))
 
+        significant_binary_paths = []
         for p in binary_paths:
-            with tempfile.TemporaryDirectory() as tempdir:
-                move(p, tempdir)
-                path_ll = lift(os.path.join(tempdir, os.path.basename(p)), args["get_cfg_path"], args["ida_path"],
-                               args["llvm_dis_path"], args["mcsema_disas_timeout"], args["llvm_version"],
-                               args["os_version"], args["mcsema_lift_path"])
-                if path_ll:
-                    num_files += extract_funcs_from_ll(path_ll, name2label, args["dataset_path"])
-    return num_files
+            crate_name = os.path.basename(p) if not crate_name else crate_name 
+            path_ll = lift(p, args["get_cfg_path"], args["ida_path"], args["llvm_dis_path"],
+                           args["mcsema_disas_timeout"], args["llvm_version"], args["os_version"],
+                           args["mcsema_lift_path"])
+            if path_ll:
+                significant_binary_paths.append(p)
+                files = extract_funcs_from_ll(crate_name, path_ll, name2label, args["dataset_ll_path"])
+                num_files += len(files)
+                bin2funcs[p] = files
+    return num_files, source_paths, bin2funcs
 
 
 def safe_call(p_lock, t_lock, f, *args, **kwargs):
@@ -468,22 +490,43 @@ def get_repo(idx, stars, prev_idx, g, repositories):
     num_requests = idx.value // pagesize - prev_idx // pagesize
     remaining, _ = g.rate_limiting
     if remaining < num_requests:
-        time.sleep(abs(g.rate_limiting_resettime - time.time()) + dt)
+        sleep(abs(g.rate_limiting_resettime - time()) + dt)
     try:
         repo = repositories[idx.value]
     except (RateLimitExceededException, requests.exceptions.ConnectTimeout):
         # use this exception because PyGithub bug rate_limiting calculation
-        time.sleep(abs(g.rate_limiting_resettime - time.time()) + dt)
+        sleep(abs(g.rate_limiting_resettime - time()) + dt)
         repo = repositories[idx.value]
 
     return idx.value, repo, repositories
 
 
-def gen_dataset(p_lock, t_lock, num_files, idx, stars, args, max_retries=3, time_to_wait=5):
-    g = github.Github(args["token"])
-    random.seed(threading.get_native_id())
+def remove_reduntant_files(path, significant_paths):
+    q = Queue()
+    for p in os.scandir(path):
+        q.put(p)
+    to_remove = []
+    while not q.empty():
+        f = q.get()
+        if f.is_file():
+            if os.path.abspath(f) in significant_paths:
+                continue
+            else:
+                to_remove.append(f)
+        else:
+            for p in os.scandir(f):
+                q.put(p)
+    for f in to_remove:
+        os.remove(f)
 
-    with open(args["processed_repos_path"], "a+") as processed_repos_file, tempfile.TemporaryDirectory() as tmpdir:
+
+def gen_dataset(p_lock, t_lock, num_files, idx, stars, args, max_retries=3, time_to_wait=5):
+    g = Github(args["token"])
+    seed(get_native_id())
+    path = args["dataset_bin_path"]
+
+    with open(args["processed_repos_path"], "a+") as processed_repos_file, \
+            open(args["funcs_map_path"], "a+") as map_file:
         processed_repos_file.seek(0)
         processed_repos = set(processed_repos_file.read().split("\n"))
         repositories = g.search_repositories(query=f"stars:<={stars.value} language:rust", sort="stars", order="desc")
@@ -499,31 +542,44 @@ def gen_dataset(p_lock, t_lock, num_files, idx, stars, args, max_retries=3, time
                     r = requests.get(repo.html_url + "/zipball/master")
                     break
                 except:
-                    time.sleep(time_to_wait)
+                    sleep(time_to_wait)
             else:
                 continue
             if not r.ok:
                 continue
 
-            path_zip = os.path.join(tmpdir, full_name.replace("/", "_") + ".zip")
+            bpath = os.path.join(path, repo.owner.login)
+            os.makedirs(bpath, exist_ok=True)
+            path_zip = os.path.join(bpath, repo.name + "-master.zip")
             with open(path_zip, "wb") as f:
                 f.write(r.content)
-            with zipfile.ZipFile(path_zip, "r") as zip_ref:
-                zip_ref.extractall(tmpdir)
+            with ZipFile(path_zip, "r") as zip_ref:
+                rname = zip_ref.filelist[0].filename
+                zip_ref.extractall(bpath)
             os.remove(path_zip)
-            path_proj = os.path.join(tmpdir, os.listdir(tmpdir)[0])
-            nfiles = process_project(path_proj, args)
+            path_proj = os.path.join(bpath, rname)
+            nfiles, source_paths, bin2funcs = process_project(path_proj, args, p_lock, t_lock)
             with p_lock, t_lock:
                 num_files.value += nfiles
                 print(f"{full_name}: {nfiles}")
-            rmtree(path_proj)
+            if not nfiles:
+                rmtree(path_proj)
+                try:
+                    os.rmdir(bpath)
+                except OSError:
+                    pass
+            else:
+                remove_reduntant_files(path_proj, set(chain(source_paths, bin2funcs)))
+                safe_call(p_lock, t_lock, map_file.write, dumps(bin2funcs))
+                safe_call(p_lock, t_lock, map_file.write, "\n")
+                map_file.flush()
             safe_call(p_lock, t_lock, processed_repos_file.write, full_name + "\n")
             processed_repos_file.flush()
 
 
 def spawn_threads(p_lock, num_files, idx, stars, args):
-    t_lock = threading.Lock()
-    pool = [threading.Thread(target=gen_dataset, args=(p_lock, t_lock, num_files, idx, stars, args))
+    t_lock = tLock()
+    pool = [Thread(target=gen_dataset, args=(p_lock, t_lock, num_files, idx, stars, args))
             for _ in range(args["num_threads"])]
     for t in pool:
         t.start()
@@ -532,19 +588,19 @@ def spawn_threads(p_lock, num_files, idx, stars, args):
 
 
 def spawn_processes(args):
-    p_lock = mp.Lock()
+    p_lock = mLock()
     num_files = Value("i", 0, lock=False)
     idx = Value("i", -1, lock=False)
     try:
         with open(args["processed_repos_path"], "r") as processed_repos_file:
             last_repo_name = processed_repos_file.read().split("\n")[-2]
-        stars = github.Github(args["token"]).search_repositories(query=f"repo:{last_repo_name}")[0].stargazers_count
+        stars = Github(args["token"]).search_repositories(query=f"repo:{last_repo_name}")[0].stargazers_count
 
     except FileNotFoundError:
         stars = int(1e6)
 
     stars = Value("i", stars, lock=False)
-    pool = [mp.Process(target=spawn_threads, args=(p_lock, num_files, idx, stars, args))
+    pool = [Process(target=spawn_threads, args=(p_lock, num_files, idx, stars, args))
             for _ in range(args["num_processes"])]
     for p in pool:
         p.start()
@@ -558,15 +614,17 @@ def create_dataset_tree(path):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser()
+    parser = ArgumentParser()
     parser.add_argument("--token", type=str, required=True)
-    parser.add_argument("--dataset-path", type=str, required=True)
+    parser.add_argument("--dataset-bin-path", type=str, required=True)
+    parser.add_argument("--dataset-ll-path", type=str, required=True)
     parser.add_argument("--extractor-path", type=str, help="path to rust_extractor binary", required=True)
     parser.add_argument("--processed-repos-path", type=str, required=True)
+    parser.add_argument("--funcs-map-path", type=str, required=True)
     parser.add_argument("--ida-path", type=str, required=True)
     parser.add_argument("--get-cfg-path", type=str, help="path to get_cfg.py script from mcsema", required=True)
     parser.add_argument("--mcsema-lift-path", type=str, default="")
-    parser.add_argument("--llvm-version", type=int, default=11)
+    parser.add_argument("--llvm-version", type=int, default=12)
     parser.add_argument("--os-version", type=str, default="ubuntu20.04")
     parser.add_argument("--llvm-dis-path", type=str, required=True)
     parser.add_argument("--prob-path", type=str, required=True)
@@ -580,5 +638,6 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    create_dataset_tree(args["dataset_path"])
+    os.makedirs(args["dataset_bin_path"], exist_ok=True)
+    create_dataset_tree(args["dataset_ll_path"])
     spawn_processes(args)
