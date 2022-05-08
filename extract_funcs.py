@@ -5,11 +5,10 @@ import multiprocessing as mp
 import threading
 import subprocess
 import tempfile
-import itertools
 import re
 import queue
 import json
-
+from itertools import chain
 
 re_parse = re.compile(r"[a-zA-Z0-9]+")
 
@@ -71,7 +70,7 @@ def extract_funcs_cpp(q_in, q_out, args):
                              if arg.kind == cind.CursorKind.PARM_DECL) \
                     if f.kind == cind.CursorKind.FUNCTION_TEMPLATE \
                     else (arg.type.get_canonical().spelling for arg in f.get_arguments())
-                types_string = ",".join(itertools.chain([f.result_type.get_canonical().spelling], arg_types))
+                types_string = ",".join(chain([f.result_type.get_canonical().spelling], arg_types))
 
                 funcs_from_file.append("|".join(
                     [f.spelling, types_string,
@@ -104,20 +103,26 @@ def change_type_cpp_analog(t):
     return rust2cpp[t] if t in rust2cpp else "struct"
 
 
-def parse_json(json_file):
+def parse_json(json_file, append_sources=False):
     funcs_from_file = []
     try:
         funcs = json.load(json_file)
     except json.decoder.JSONDecodeError:
         return set()
 
+    func2body = {}
     for f in funcs:
         comment = " ".join(f["comments"])
         funcs_from_file.append("|".join(
             [f["name"],
-             ",".join(itertools.chain([change_type_cpp_analog(f["output_type"])],
-                                      map(change_type_cpp_analog, f["arg_types"]))),
+             ",".join(chain([change_type_cpp_analog(f["output_type"])],
+                            map(change_type_cpp_analog, f["arg_types"]))),
              ",".join(map(lambda x: x.group(), re_parse.finditer(comment)) if comment else "")]))
+        func2body[f["name"]] = f["func"]
+        if not append_sources:
+            return funcs_from_file
+        else:
+            return funcs_from_file, func2body
     return funcs_from_file
 
 

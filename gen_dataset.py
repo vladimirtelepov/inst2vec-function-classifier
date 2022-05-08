@@ -228,7 +228,7 @@ classes = {
 }
 
 
-def extract_funcs_from_ll(crate_name, path_ll, name2label, path_dataset, randlen=5):
+def extract_funcs_from_ll(crate_name, path_ll, name2label, name2body, path_dataset, randlen=5):
     one_from_names = rf"(?:{'|'.join(name2label.keys())})"
     str_pattern = rf"define internal %struct\.Memory\* @sub_[^_]+_(\w+?{one_from_names}[a-zA-Z0-9]{{20}})\(%struct\."
     str_pattern += r"State\* noalias nonnull align 1 %state, i64 %pc, %struct\.Memory\* noalias %memory\)[^}]+}\n"
@@ -247,8 +247,9 @@ def extract_funcs_from_ll(crate_name, path_ll, name2label, path_dataset, randlen
                 if name in name2label and cratename == crate_name:
                     rand = "".join(choice([str(i) for i in range(10)]) for _ in range(randlen))
                     filename = os.path.join(os.path.join(path_dataset, name2label[name]), name + rand + ".ll")
-                    with open(filename, "wb") as f:
+                    with open(filename, "wb") as f, open(filename + ".info", "w") as finfo:
                         f.write(match.group(0))
+                        finfo.write(f"{name2body[name]}")
                     num_files += 1
                     files.append(filename)
     return files
@@ -257,12 +258,10 @@ def extract_funcs_from_ll(crate_name, path_ll, name2label, path_dataset, randlen
 def predict_label(signatures, prob_path):
     func_names = []
     func_types = []
-    func_comments = []
     for name, types, comments in (x for x in map(lambda l: l.strip().split("|"), signatures)):
         func_types.append(types.split(","))
-        func_comments.append(comments.split(","))
         func_names.append(name)
-
+    
     def tokenize_funcs(funcs):
         oneword = compile(r"^[a-z][a-z0-9]+|[A-Z][A-Z0-9]$")
         difCase = compile(r".+?(?:(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])|$)")
@@ -336,7 +335,7 @@ def predict_label(signatures, prob_path):
             if processed_tokens:
                 tokenized_func_names_.append(processed_tokens)
                 func_names_.append(name)
-
+                
         return func_names_, tokenized_func_names_
 
     func_names, tokenized_func_names = prune_vocabulary(func_names, tokenized_func_names, stop_words)
@@ -423,13 +422,20 @@ def process_project(path, args):
                 q.put(p)
 
     signatures = set()
+    name2body = {}
     with NamedTemporaryFile("r+") as tmpfile:
         for p in source_paths:
             tmpfile.truncate(0)
             if call(f"{args['extractor_path']} {p} {tmpfile.name}", shell=True, stdout=DEVNULL, stderr=DEVNULL):
                 continue
             tmpfile.seek(0)
-            signatures |= set(parse_json(tmpfile))
+
+            res = parse_json(tmpfile, append_sources=True)
+            if not res:
+                continue
+            else:
+                signatures |= set(res[0])
+                name2body.update(res[1])
     name2label = predict_label(signatures, args["prob_path"])
     num_files = 0
     if not name2label:
@@ -462,7 +468,7 @@ def process_project(path, args):
                            args["mcsema_lift_path"])
             if path_ll:
                 significant_binary_paths.append(p)
-                files = extract_funcs_from_ll(crate_name, path_ll, name2label, args["dataset_ll_path"])
+                files = extract_funcs_from_ll(crate_name, path_ll, name2label, name2body, args["dataset_ll_path"])
                 num_files += len(files)
                 bin2funcs[p] = files
     return num_files, source_paths, bin2funcs
@@ -558,7 +564,7 @@ def gen_dataset(p_lock, t_lock, num_files, idx, stars, args, max_retries=3, time
                 zip_ref.extractall(bpath)
             os.remove(path_zip)
             path_proj = os.path.join(bpath, rname)
-            nfiles, source_paths, bin2funcs = process_project(path_proj, args, p_lock, t_lock)
+            nfiles, source_paths, bin2funcs = process_project(path_proj, args)
             with p_lock, t_lock:
                 num_files.value += nfiles
                 print(f"{full_name}: {nfiles}")
@@ -570,7 +576,7 @@ def gen_dataset(p_lock, t_lock, num_files, idx, stars, args, max_retries=3, time
                     pass
             else:
                 remove_reduntant_files(path_proj, set(chain(source_paths, bin2funcs)))
-                safe_call(p_lock, t_lock, map_file.write, dumps(bin2funcs))
+                safe_call(p_lock, t_lock, map_file.write, dumps(bin2funcs, indent=4))
                 safe_call(p_lock, t_lock, map_file.write, "\n")
                 map_file.flush()
             safe_call(p_lock, t_lock, processed_repos_file.write, full_name + "\n")
