@@ -41,6 +41,7 @@ struct ExtractedInfo {
     pub arg_types: Vec<String>,
     pub output_type: String,
     pub comments: Vec<String>,
+    pub func: String,
 }
 
 fn extract_info(input: &str, items: &[syn::Item]) -> Vec<ExtractedInfo> {
@@ -57,6 +58,7 @@ fn extract_info(input: &str, items: &[syn::Item]) -> Vec<ExtractedInfo> {
                         &fn_item.sig,
                         last_item_end,
                         fn_item.span().start(),
+                        quote!(#fn_item).to_string(),
                     ));
                     last_item_end = item.span().end();
                 }
@@ -76,6 +78,7 @@ fn extract_info(input: &str, items: &[syn::Item]) -> Vec<ExtractedInfo> {
                                 &method_item.sig,
                                 last_item_end,
                                 method_item.span().start(),
+                                quote!(#method_item).to_string(),
                             ));
 
                             last_item_end = item.span().end();
@@ -104,6 +107,7 @@ fn extract_info_impl(
     sig: &syn::Signature,
     last_item_end: LineColumn,
     current_item_start: LineColumn,
+    func: String,
 ) -> ExtractedInfo {
     let mut comments = extracts_comments_from_attrs(attrs);
     if last_item_end < current_item_start {
@@ -122,6 +126,7 @@ fn extract_info_impl(
         arg_types,
         output_type,
         comments,
+        func,
     }
 }
 
@@ -134,7 +139,7 @@ fn extract_comments(
     for _ in 1..last_item_end.line {
         let newline_pos = match input[last_item_offset..].find("\n") {
             Some(pos) => pos,
-            None => return String::new()
+            None => return String::new(),
         };
         last_item_offset += newline_pos + 1;
     }
@@ -144,7 +149,7 @@ fn extract_comments(
     for _ in 1..current_item_start.line {
         let newline_pos = match input[current_item_offset..].find("\n") {
             Some(pos) => pos,
-            None => return String::new()
+            None => return String::new(),
         };
         current_item_offset += newline_pos + 1;
     }
@@ -155,10 +160,14 @@ fn extract_comments(
     }
 
     let t = input[last_item_offset..current_item_offset].to_string();
-    let mut t=  t.replace("\n", ",");
+    let mut t = t.replace("\n", ",");
     t.retain(|c| (c != '/'));
 
-    t.trim_start_matches(',').trim_start_matches(' ').trim_end_matches(',').trim_end_matches(' ').to_string()
+    t.trim_start_matches(',')
+        .trim_start_matches(' ')
+        .trim_end_matches(',')
+        .trim_end_matches(' ')
+        .to_string()
 }
 
 fn extracts_comments_from_attrs(attrs: &[syn::Attribute]) -> Vec<String> {
