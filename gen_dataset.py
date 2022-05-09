@@ -1,5 +1,4 @@
 import os
-import toml
 import spacy
 import requests
 import dill as pickle
@@ -228,7 +227,7 @@ classes = {
 }
 
 
-def extract_funcs_from_ll(crate_name, path_ll, name2label, name2body, path_dataset, randlen=5):
+def extract_funcs_from_ll(bin_name, path_ll, name2label, name2body, path_dataset, randlen=5):
     one_from_names = rf"(?:{'|'.join(name2label.keys())})"
     str_pattern = rf"define internal %struct\.Memory\* @sub_[^_]+_(\w+?{one_from_names}[a-zA-Z0-9]{{20}})\(%struct\."
     str_pattern += r"State\* noalias nonnull align 1 %state, i64 %pc, %struct\.Memory\* noalias %memory\)[^}]+}\n"
@@ -241,10 +240,10 @@ def extract_funcs_from_ll(crate_name, path_ll, name2label, name2body, path_datas
             for match in pattern.finditer(mmap_obj):
                 fullname = demangle(str(match.group(1), encoding="utf8"))
                 fullname = fullname[: fullname.rfind("::")]
-                cratename = fullname[: fullname.find("::")]
-                cratename = cratename[5: cratename.find("__", 5)] if cratename.startswith("__LT_") else cratename
+                binname = fullname[: fullname.find("::")]
+                binname = binname[5: binname.find("__", 5)] if binname.startswith("__LT_") else binname
                 name = fullname[fullname.rfind("::") + 2:]
-                if name in name2label and cratename == crate_name:
+                if name in name2label and binname == bin_name:
                     rand = "".join(choice([str(i) for i in range(10)]) for _ in range(randlen))
                     filename = os.path.join(os.path.join(path_dataset, name2label[name]), name + rand + ".ll")
                     with open(filename, "wb") as f, open(filename + ".info", "w") as finfo:
@@ -446,13 +445,6 @@ def process_project(path, args):
 
     bin2funcs = {}
     if ret_code == 0:
-        with open(cargo_path) as f:
-            content = toml.load(f)
-        try:
-            crate_name = content["package"]["name"]
-        except KeyError:
-            crate_name = None
-
         binary_paths = []
         for f in os.scandir(os.path.join(os.path.join(path, "target"), "debug")):
             if f.is_file():
@@ -462,13 +454,17 @@ def process_project(path, args):
 
         significant_binary_paths = []
         for p in binary_paths:
-            crate_name = os.path.basename(p) if not crate_name else crate_name 
             path_ll = lift(p, args["get_cfg_path"], args["ida_path"], args["llvm_dis_path"],
                            args["mcsema_disas_timeout"], args["llvm_version"], args["os_version"],
                            args["mcsema_lift_path"])
             if path_ll:
                 significant_binary_paths.append(p)
-                files = extract_funcs_from_ll(crate_name, path_ll, name2label, name2body, args["dataset_ll_path"])
+                bin_name = os.path.basename(p)
+                bin_name = bin_name[3: ] if bin_name.startswith("lib") else bin_name
+                bin_name = bin_name[: -5] if bin_name.endswith(".rlib") else bin_name
+                bin_name = bin_name[: -3] if bin_name.endswith(".so") else bin_name
+                bin_name = bin_name[: -2] if bin_name.endswith(".a") else bin_name
+                files = extract_funcs_from_ll(bin_name, path_ll, name2label, name2body, args["dataset_ll_path"])
                 num_files += len(files)
                 bin2funcs[p] = files
     return num_files, source_paths, bin2funcs
@@ -569,7 +565,7 @@ def gen_dataset(p_lock, t_lock, num_files, idx, stars, args, max_retries=3, time
                 num_files.value += nfiles
                 print(f"{full_name}: {nfiles}")
             if not nfiles:
-                rmtree(path_proj)
+                rmtree(path_proj, ignore_errors=True)
                 try:
                     os.rmdir(bpath)
                 except OSError:
