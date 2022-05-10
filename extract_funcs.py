@@ -119,11 +119,10 @@ def parse_json(json_file, append_sources=False):
                             map(change_type_cpp_analog, f["arg_types"]))),
              ",".join(map(lambda x: x.group(), re_parse.finditer(comment)) if comment else "")]))
         func2body[f["name"]] = f["func"]
-        if not append_sources:
-            return funcs_from_file
-        else:
-            return funcs_from_file, func2body
-    return funcs_from_file
+    if not append_sources:
+        return funcs_from_file
+    else:
+        return funcs_from_file, func2body
 
 
 def extract_funcs_rust(q_in, q_out, args):

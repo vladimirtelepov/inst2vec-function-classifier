@@ -511,9 +511,7 @@ def remove_reduntant_files(path, significant_paths):
     while not q.empty():
         f = q.get()
         if f.is_file():
-            if os.path.abspath(f) in significant_paths:
-                continue
-            else:
+            if os.path.abspath(f) not in significant_paths and not f.is_symlink():
                 to_remove.append(f)
         else:
             for p in os.scandir(f):
